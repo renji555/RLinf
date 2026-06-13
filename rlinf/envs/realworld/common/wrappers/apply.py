@@ -159,11 +159,15 @@ def apply_dual_arm_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
                 "use_gello=True on a dual-arm env requires both "
                 "'left_gello_port' and 'right_gello_port' in the env config."
             )
+        override_cfg = cfg.get("override_cfg", {}) or {}
+        teleop_cfg = override_cfg.get("teleop_config", {}) or {}
+        smooth_intervene = bool(teleop_cfg.get("smooth_intervene", False))
         env = DualGelloIntervention(
             env,
             left_port=left_port,
             right_port=right_port,
             gripper_enabled=gripper_enabled,
+            smooth_intervene=smooth_intervene,
         )
 
     env = _apply_keyboard_reward(env, cfg.get("keyboard_reward_wrapper", None))

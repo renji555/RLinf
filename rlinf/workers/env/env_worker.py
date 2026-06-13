@@ -61,6 +61,7 @@ class EnvWorker(Worker):
         self.train_video_cnt = 0
         self.eval_video_cnt = 0
         self.should_stop = False
+        self.env_async_mode = False
 
         self.env_list = []
         self.eval_env_list = []
@@ -134,6 +135,17 @@ class EnvWorker(Worker):
             // self.cfg.actor.model.num_action_chunks
         )
         self.actor_split_num = self.get_actor_split_num()
+        self.smooth_intervene = bool(
+            OmegaConf.select(
+                self.cfg,
+                "env.train.override_cfg.teleop_config.smooth_intervene",
+                default=False,
+            )
+        )
+        if self.smooth_intervene:
+            assert self.train_num_envs_per_stage==1, "smooth intervene does not support multi-env in one env_worker"
+        self.next_intervene_flags = [False for _ in range(self.stage_num)]
+        self.last_train_rollout_results = [None for _ in range(self.stage_num)]
 
         if not self.only_eval:
             self.train_prev_done: list[torch.Tensor] = [
@@ -413,7 +425,9 @@ class EnvWorker(Worker):
         for i in range(self.stage_num):
             if not self.only_eval:
                 if self.cfg.env.train.auto_reset:
-                    extracted_obs, _ = self.env_list[i].reset()
+                    extracted_obs, _ = self.env_list[i].reset(
+                        options={"skip_reset_complete_button": True}
+                    )
                     self.last_obs_list.append(extracted_obs)
                     self.last_intervened_info_list.append((None, None))
                 if self.train_enable_offload and self.train_enable_init_offload:
@@ -424,7 +438,10 @@ class EnvWorker(Worker):
 
     @Worker.timer("env_interact_step")
     def env_interact_step(
-        self, chunk_actions: torch.Tensor, stage_id: int
+        self, 
+        chunk_actions: torch.Tensor,
+        stage_id: int,
+        smooth_intervene: bool = False,
     ) -> tuple[EnvOutput, dict[str, Any]]:
         """
         This function is used to interact with the environment.
@@ -446,8 +463,12 @@ class EnvWorker(Worker):
             chunk_actions = exec_actions
         env_info = {}
 
+        chunk_step_kwargs: dict[str, Any] = {}
+        if self.cfg.env.train.env_type == "realworld":
+            chunk_step_kwargs["smooth_intervene_mode"] = smooth_intervene
+
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
-            self.env_list[stage_id].chunk_step(chunk_actions)
+            self.env_list[stage_id].chunk_step(chunk_actions, **chunk_step_kwargs)
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
@@ -501,6 +522,94 @@ class EnvWorker(Worker):
             intervene_flags=intervene_flags,
         )
         return env_output, env_info
+
+    # Maps forward_inputs observation keys → env_obs keys (from obs_processor).
+    _OBS_KEY_FROM_ENV_OBS: dict[str, str] = {
+        "observation/image": "main_images",
+        "observation/state": "states",
+        "observation/extra_view_image": "extra_view_images",
+        "observation/wrist_image": "wrist_images",
+    }
+
+    def _build_dummy_rollout_result(
+        self,
+        rollout_result: RolloutResult | None,
+        curr_obs: dict | None = None,
+    ) -> RolloutResult:
+        """Build a dummy RolloutResult for smooth-intervene steps.
+
+        Action and policy-statistic tensors (logprobs, values, versions, chains,
+        etc.) are zeroed so they do not corrupt training statistics.  Observation
+        tensors (``observation/*`` keys) are taken from *curr_obs* when provided,
+        falling back to a clone of the previous rollout's observation rather than
+        zeros — preserving the real camera frames the robot was seeing.
+
+        Args:
+            rollout_result: The most recent real rollout result, used as a shape
+                template and fallback for observation fields.
+            curr_obs: The current environment observation dict (keys such as
+                ``main_images``, ``states``, ``extra_view_images``).  Should be
+                ``env_output.obs`` at the call site.
+        """
+        if rollout_result is None:
+            raise ValueError(
+                "A real rollout result must be received before building a dummy rollout result."
+            )
+        def _zero_tensor(tensor: torch.Tensor | None) -> torch.Tensor | None:
+            return torch.zeros_like(tensor) if tensor is not None else None
+
+        def _obs_tensor(key: str) -> torch.Tensor:
+            """Return the current-obs tensor for *key*, or clone *prev_value*."""
+            assert curr_obs is not None, "curr_obs cannot be None"
+            env_obs_key = self._OBS_KEY_FROM_ENV_OBS.get(key)
+            assert env_obs_key is not None, f"curr_obs['{key}'] is None, please check _OBS_KEY_FROM_ENV_OBS"
+            env_value = curr_obs.get(env_obs_key)
+            if isinstance(env_value, torch.Tensor):
+                return env_value.cpu().contiguous()
+
+        dummy_actions = _zero_tensor(rollout_result.actions)
+
+        def _dummy_forward_input(key: str, value: torch.Tensor) -> torch.Tensor | None:
+            if key.startswith("observation/"):
+                return _obs_tensor(key)
+            if key in ("tokenized_prompt", "tokenized_prompt_mask"):
+                return value.clone()
+            return _zero_tensor(value)
+
+        dummy_forward_inputs = {
+            key: _dummy_forward_input(key, value)
+            for key, value in rollout_result.forward_inputs.items()
+            if value is not None
+        }
+
+        if "action" not in dummy_forward_inputs and dummy_actions is not None:
+            dummy_forward_inputs["action"] = (
+                dummy_actions.reshape(dummy_actions.shape[0], -1).contiguous()
+            )
+
+        if dummy_actions is None or "action" not in dummy_forward_inputs:
+            raise ValueError(
+                "Dummy rollout results require per-step action tensors from a real training rollout result."
+            )
+
+        return RolloutResult(
+            actions=dummy_actions,
+            prev_logprobs=_zero_tensor(rollout_result.prev_logprobs),
+            prev_values=_zero_tensor(rollout_result.prev_values),
+            bootstrap_values=_zero_tensor(rollout_result.bootstrap_values),
+            save_flags=_zero_tensor(rollout_result.save_flags),
+            forward_inputs=dummy_forward_inputs,
+            versions=_zero_tensor(rollout_result.versions),
+        )
+
+    @staticmethod
+    def _should_continue_smooth_intervene(
+        intervene_flags: torch.Tensor | None, dones: torch.Tensor
+    ) -> bool:
+        if intervene_flags is None:
+            return False
+        continue_smooth_intervene = bool(intervene_flags[:, -1].any().item()) and not bool(dones.any().item())
+        return continue_smooth_intervene
 
     def env_evaluate_step(
         self, raw_actions: torch.Tensor, stage_id: int
@@ -1003,9 +1112,10 @@ class EnvWorker(Worker):
                 },
             )
 
-    def _bootstrap_and_send_train(self, rollout_channel: Channel) -> list[EnvOutput]:
+    def _bootstrap_and_send_train(self, rollout_channel: Channel, no_send:bool = False) -> list[EnvOutput]:
         env_outputs = self.bootstrap_step()
-        self._send_train_bootstrap(rollout_channel, env_outputs)
+        if not no_send:
+            self._send_train_bootstrap(rollout_channel, env_outputs)
         return env_outputs
 
     def prefetch_train_bootstrap(self, rollout_channel: Channel) -> None:
@@ -1092,7 +1202,7 @@ class EnvWorker(Worker):
                 env_outputs = self._prefetched_train_bootstrap
                 self._prefetched_train_bootstrap = None
             else:
-                env_outputs = self._bootstrap_and_send_train(rollout_channel)
+                env_outputs = self._bootstrap_and_send_train(rollout_channel, no_send=bool(np.all(self.next_intervene_flags)))
 
             for chunk_step_idx in range(self.n_train_chunk_steps):
                 for stage_id in range(self.stage_num):
@@ -1120,9 +1230,24 @@ class EnvWorker(Worker):
                                 reward_model_output.detach().float().reshape(-1).cpu()
                             )
 
-                    rollout_result = self.recv_rollout_results(
-                        input_channel, mode="train"
-                    )
+                    self._logger.info(f"new_chunk, next_intervene_flags: {self.next_intervene_flags}")
+                    #This logger informs that the next_intervene_flags are all False, so we don't need to send the env batch to the actor
+                    if self.smooth_intervene and self.next_intervene_flags[stage_id]:
+                        rollout_result = self._build_dummy_rollout_result(
+                            self.last_train_rollout_results[stage_id],
+                            curr_obs=env_output.obs,
+                        )
+                    else:
+                        if self.env_async_mode:
+                           rollout_result = self.recv_rollout_results_from_channel(
+                                input_channel, mode="train"
+                            )
+                        else:
+                            rollout_result = self.recv_rollout_results(
+                                input_channel, mode="train"
+                            )
+                        if rollout_result.forward_inputs is not None:
+                            self.last_train_rollout_results[stage_id] = rollout_result
                     rewards = self.compute_bootstrap_rewards(
                         env_output, rollout_result.bootstrap_values, reward_model_output
                     )
@@ -1170,15 +1295,44 @@ class EnvWorker(Worker):
                                 actions["expert_actions"] = expert_actions
                     else:
                         actions = rollout_result.actions
-                    env_output, env_info = self.env_interact_step(actions, stage_id)
-                    env_batch = env_output.to_dict()
-                    self.send_env_batch(
-                        rollout_channel,
-                        {
-                            "obs": env_batch["obs"],
-                            "final_obs": env_batch["final_obs"],
-                        },
+                    env_output, env_info = self.env_interact_step(
+                        actions, 
+                        stage_id,
+                        smooth_intervene=self.next_intervene_flags[stage_id],
                     )
+                    env_batch = env_output.to_dict()
+                    self.next_intervene_flags[stage_id] = (
+                        self.smooth_intervene
+                        and self._should_continue_smooth_intervene(
+                            env_output.intervene_flags,
+                            env_output.dones
+                        )
+                    )
+                    self._logger.info(f"chunk end, next_intervene_flags: {self.next_intervene_flags}")
+                    if not self.next_intervene_flags[stage_id]:
+                        if self.env_async_mode:
+                            last_env_batch = False
+                            if (
+                                chunk_step_idx == self.n_train_chunk_steps - 1
+                                and stage_id == self.stage_num - 1
+                            ):
+                                last_env_batch = True
+                            self.send_env_batch_to_channel(
+                                rollout_channel,
+                                {
+                                    "obs": env_batch["obs"],
+                                    "final_obs": env_batch["final_obs"],
+                                },
+                                last_run=last_env_batch,
+                            )
+                        else:
+                            self.send_env_batch(
+                                rollout_channel,
+                                {
+                                    "obs": env_batch["obs"],
+                                    "final_obs": env_batch["final_obs"],
+                                },
+                            )
                     if self.collect_transitions:
                         next_obs = (
                             env_output.final_obs
