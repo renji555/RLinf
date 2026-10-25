@@ -161,8 +161,18 @@ class MultiStepRolloutWorker(Worker):
         self.hf_model: BasePolicy = get_model(rollout_model_config)
 
         if self.cfg.runner.get("ckpt_path", None):
-            model_dict = torch.load(self.cfg.runner.ckpt_path)
-            self.hf_model.load_state_dict(model_dict)
+            if (
+                str(rollout_model_config.model_type).lower() == "cosmos3"
+                and self.enable_dagger
+            ):
+                from rlinf.models.embodiment.cosmos3 import (
+                    load_inference_checkpoint,
+                )
+
+                load_inference_checkpoint(self.hf_model, self.cfg.runner.ckpt_path)
+            else:
+                model_dict = torch.load(self.cfg.runner.ckpt_path)
+                self.hf_model.load_state_dict(model_dict)
 
         rlt_feature_model_config = OmegaConf.select(
             self.cfg, "rollout.rlt_feature_model", default=None
@@ -182,8 +192,17 @@ class MultiStepRolloutWorker(Worker):
             self.expert_model = get_model(expert_model_config)
 
             if self.cfg.runner.get("expert_ckpt_path", None):
-                expert_model_dict = torch.load(self.cfg.runner.expert_ckpt_path)
-                self.expert_model.load_state_dict(expert_model_dict)
+                if str(expert_model_config.model_type).lower() == "cosmos3":
+                    from rlinf.models.embodiment.cosmos3 import (
+                        load_inference_checkpoint,
+                    )
+
+                    load_inference_checkpoint(
+                        self.expert_model, self.cfg.runner.expert_ckpt_path
+                    )
+                else:
+                    expert_model_dict = torch.load(self.cfg.runner.expert_ckpt_path)
+                    self.expert_model.load_state_dict(expert_model_dict)
 
         self.hf_model.eval()
         if self.expert_model is not None:

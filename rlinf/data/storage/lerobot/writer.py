@@ -32,6 +32,32 @@ def _silence_hf_datasets_progress_bars() -> None:
         pass
 
 
+def _normalize_scalar_episode_buffer(dataset: Any) -> None:
+    """Match scalar Arrow columns after per-frame shape validation."""
+    episode_buffer = getattr(dataset, "episode_buffer", None)
+    hf_features = getattr(dataset, "hf_features", None)
+    features = getattr(dataset, "features", None)
+    if episode_buffer is None or hf_features is None or features is None:
+        return
+
+    import numpy as np
+    from datasets import Value
+
+    for key, feature in hf_features.items():
+        if not isinstance(feature, Value):
+            continue
+        if tuple(features.get(key, {}).get("shape", ())) != (1,):
+            continue
+        values = episode_buffer.get(key)
+        if not isinstance(values, list):
+            continue
+        # Keep shared training frames intact and preserve each NumPy dtype.
+        episode_buffer[key] = [
+            value[0] if isinstance(value, np.ndarray) and value.shape == (1,) else value
+            for value in values
+        ]
+
+
 class LeRobotDatasetWriter:
     """
     Wrapper for LeRobotDataset that provides a simplified interface for writing episodes.
@@ -197,6 +223,7 @@ class LeRobotDatasetWriter:
         for frame_data in episode_data:
             add_frame_to_dataset(self.dataset, frame_data)
 
+        _normalize_scalar_episode_buffer(self.dataset)
         self.dataset.save_episode()
         self.logger.info(
             f"Saved episode with {len(episode_data)} frames, task: '{episode_data[0].get('task', 'N/A')}'"

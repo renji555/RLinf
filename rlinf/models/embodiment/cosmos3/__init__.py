@@ -25,6 +25,7 @@ sharded to GPU later by FSDP2. Model defaults live in the Hydra config group
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import re
 from pathlib import Path
@@ -145,6 +146,47 @@ def _load_base_weights(
     )
 
 
+def load_inference_checkpoint(model: Cosmos3Policy, checkpoint_path: str) -> None:
+    """Load RLinf weights, excluding EMA state when the policy disables EMA."""
+    state_dict = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True, mmap=True
+    )
+    ema_keys = []
+    if not model._ema_enabled:
+        ema_keys = [key for key in state_dict if key.startswith("omni.net_ema.")]
+        for key in ema_keys:
+            del state_dict[key]
+    model.load_state_dict(state_dict, strict=True)
+    logger.info(
+        "Cosmos3: loaded inference checkpoint %s (excluded EMA keys=%d)",
+        checkpoint_path,
+        len(ema_keys),
+    )
+
+
+def _configure_sft_objective(model_config, cfg: DictConfig) -> None:
+    """Select native loss weights without changing the Cosmos loss implementation."""
+    objective = cfg.get("sft_objective", "joint")
+    if objective not in ("joint", "action_only"):
+        raise ValueError(f"Unsupported Cosmos sft_objective={objective!r}.")
+    rf_config = model_config.rectified_flow_training_config
+    if cfg.get("action_model_mode", "wam") == "policy":
+        rf_config.normalize_loss_by_active = True
+    if objective == "joint":
+        return
+    if cfg.get("action_model_mode", "wam") != "policy":
+        raise ValueError("action_only supervision requires action_model_mode='policy'.")
+    action_weight = float(rf_config.action_loss_weight)
+    if not math.isfinite(action_weight) or action_weight <= 0:
+        raise ValueError(
+            "action_only supervision requires a finite positive action_loss_weight."
+        )
+    # The current image remains a clean condition. Preserve native dummy graph
+    # connections and MoE regularization, while disabling both vision FM weights.
+    rf_config.loss_scale = 0.0
+    rf_config.image_loss_scale = 0.0
+
+
 def get_model(cfg: DictConfig, torch_dtype=None):
     """Build and warm-start a ``Cosmos3Policy`` for RLinf SFT.
 
@@ -184,6 +226,7 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         cosmos3_cfg.model.config.compile.enabled = bool(
             cfg.get("compile_enabled", False)
         )
+        _configure_sft_objective(cosmos3_cfg.model.config, cfg)
 
         # Wan2.2 VAE: the cookbook injects via ${oc.env:WAN_VAE_PATH}; we build the
         # config directly, so set the local file path here instead.
@@ -244,7 +287,8 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         cosmos3_model,
         lr_multipliers=dict(cfg.get("lr_multipliers", {})),
         ema_enabled=bool(cfg.get("ema_enabled", True)),
+        rollout_config=cfg,
     )
 
 
-__all__ = ["Cosmos3Policy", "get_model"]
+__all__ = ["Cosmos3Policy", "get_model", "load_inference_checkpoint"]
