@@ -1180,12 +1180,26 @@ def _validate_cosmos3_ppo_cfg(cfg, model_cfg) -> None:
     assert valid_action_dim == 10, (
         "Cosmos3 LIBERO PPO requires cosmos3.valid_action_dim=10 for rot6d actions."
     )
-    assert int(model_cfg.get("logprob_action_dim", valid_action_dim)) == (
-        valid_action_dim
-    ), (
-        "Cosmos3 PPO requires actor.model.logprob_action_dim to match "
-        "cosmos3.valid_action_dim."
+    sde_action_space = cosmos_cfg.get("sde_action_space", "rot6d")
+    assert sde_action_space in ("rot6d", "axisangle7"), (
+        "Cosmos3 PPO sde_action_space must be 'rot6d' or 'axisangle7'."
     )
+    score_dim = 7 if sde_action_space == "axisangle7" else valid_action_dim
+    assert int(model_cfg.get("logprob_action_dim", valid_action_dim)) == score_dim, (
+        f"Cosmos3 PPO requires logprob_action_dim={score_dim} for {sde_action_space}."
+    )
+    if sde_action_space == "axisangle7":
+        lower = cosmos_cfg.get("rotation_q01")
+        upper = cosmos_cfg.get("rotation_q99")
+        for name, values in (("rotation_q01", lower), ("rotation_q99", upper)):
+            assert (
+                (OmegaConf.is_list(values) or isinstance(values, (tuple, list)))
+                and len(values) == 3
+                and all(type(v) in (int, float) and math.isfinite(v) for v in values)
+            ), f"Cosmos3 axisangle7 requires three finite numeric {name} values."
+        assert all(lo < hi for lo, hi in zip(lower, upper)), (
+            "Cosmos3 axisangle7 requires rotation_q99 > rotation_q01 on every axis."
+        )
 
 
 def validate_only_eval_rollout_model(model_cfg) -> None:

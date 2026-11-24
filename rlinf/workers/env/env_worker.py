@@ -654,6 +654,17 @@ class EnvWorker(Worker):
 
         return infer_batch_size(data)
 
+    def annotate_ppo_videos(self, step: int, actor_world_size: int) -> None:
+        """Attach completed training metrics to this worker's rollout videos."""
+        for env in self.env_list:
+            annotate = get_env_attr(env, "annotate_ppo_videos")
+            if callable(annotate):
+                paths = annotate(
+                    self.cfg.runner.logger.log_path, step, actor_world_size
+                )
+                for path in paths:
+                    self.log_info(f"PPO metrics overlaid on video: {path}")
+
     def finish_rollout(self, mode="train"):
         # reset
         if mode == "train":
@@ -880,6 +891,15 @@ class EnvWorker(Worker):
         key: TrajectoryKey | None,
     ) -> None:
         if key is not None:
+            if (
+                self.cfg.env.train.video_cfg.get("ppo_overlay", False)
+                and self.cfg.env.train.video_cfg.save_video
+            ):
+                from rlinf.utils.rollout_video import make_sample_ids
+
+                policy_input.obs["video_sample_id"] = make_sample_ids(
+                    key, self.train_num_envs_per_stage
+                )
             policy_input.sources = [
                 TrajectorySource(key=key, size=self.train_num_envs_per_stage)
             ]
@@ -1152,6 +1172,24 @@ class EnvWorker(Worker):
                     actions = self._recv_actions(input_channel, stage_id)
                     self.smooth_intervene.remember_actions(stage_id, actions)
 
+                    if (
+                        self.cfg.env.train.video_cfg.get("ppo_overlay", False)
+                        and self.cfg.env.train.video_cfg.save_video
+                    ):
+                        set_context = get_env_attr(
+                            self.env_list[stage_id], "set_ppo_video_context"
+                        )
+                        if not callable(set_context):
+                            raise RuntimeError(
+                                "PPO video overlay requires RecordVideo."
+                            )
+                        set_context(
+                            self._trajectory_step,
+                            epoch,
+                            self._rank,
+                            stage_id,
+                            chunk_step_idx,
+                        )
                     env_output, env_info, chunk_step_data = self.env_interact_step(
                         actions,
                         stage_id,

@@ -75,6 +75,9 @@ class RecordVideo(gym.Wrapper):
         self.video_cfg = video_cfg
         self.render_images: list[np.ndarray] = []
         self.video_cnt = 0
+        self._ppo_context = None
+        self._ppo_frame_manifest = []
+        self._ppo_pending_videos = []
         self._num_envs = getattr(env, "num_envs", 1)
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._save_futures: list[Future] = []
@@ -294,6 +297,8 @@ class RecordVideo(gym.Wrapper):
                         value = value.item()
                     elif value.size == 1:
                         value = value.reshape(-1)[0].item()
+                elif isinstance(value, np.generic):
+                    value = value.item()
                 elif isinstance(value, numbers.Number):
                     pass
                 else:
@@ -303,6 +308,34 @@ class RecordVideo(gym.Wrapper):
 
         return info_item
 
+    def set_ppo_video_context(
+        self, step: int, epoch: int, env_rank: int, stage: int, chunk: int
+    ) -> None:
+        """Identify the action chunk whose post-action frames are recorded next."""
+        self._ppo_context = [step, epoch, env_rank, stage, chunk]
+
+    def annotate_ppo_videos(
+        self, log_path: str, step: int, actor_world_size: int
+    ) -> list[str]:
+        """Overlay the training metrics once all actor shards are available."""
+        if not self._ppo_pending_videos:
+            return []
+        from rlinf.utils.rollout_video import (
+            annotate_video,
+            export_video_page,
+            load_video_metric_history,
+        )
+
+        histories = load_video_metric_history(log_path, step, actor_world_size)
+        metrics = {key: records[-1] for key, records in histories.items()}
+        paths = []
+        for path in self._ppo_pending_videos:
+            annotate_video(path, metrics)
+            export_video_page(path, metrics, histories)
+            paths.append(path)
+        self._ppo_pending_videos = []
+        return paths
+
     def _append_frame(
         self,
         images: list[np.ndarray],
@@ -310,20 +343,46 @@ class RecordVideo(gym.Wrapper):
         rewards: Optional[Any],
         terminations: Optional[Any],
         time_idx: Optional[int] = None,
+        ppo_boundary: bool = False,
     ) -> None:
         """Overlay info (optional) and append a tiled frame."""
         if not images:
             return
+        frame_infos = []
+        if self.video_cfg.get("info_on_video", True) or self.video_cfg.get(
+            "ppo_overlay", False
+        ):
+            frame_infos = [
+                self._build_info_item(infos, rewards, terminations, env_id, time_idx)
+                for env_id in range(len(images))
+            ]
         if self.video_cfg.get("info_on_video", True):
             images = [
-                put_info_on_image(
-                    img,
-                    self._build_info_item(
-                        infos, rewards, terminations, env_id, time_idx
-                    ),
-                )
-                for env_id, img in enumerate(images)
+                put_info_on_image(img, item) for img, item in zip(images, frame_infos)
             ]
+        if self.video_cfg.get("ppo_overlay", False):
+            shape = images[0].shape
+            if any(image.shape != shape for image in images):
+                raise ValueError(
+                    "PPO tiled video requires equal-sized environment images."
+                )
+            height, width = shape[:2]
+            rows = max(1, int(np.sqrt(len(images))))
+            sample_ids = None
+            if self._ppo_context is not None and not ppo_boundary:
+                sample_ids = [
+                    self._ppo_context + [env_id] for env_id in range(len(images))
+                ]
+            self._ppo_frame_manifest.append(
+                {
+                    "sample_ids": sample_ids,
+                    "infos": frame_infos,
+                    "tile_boxes": [
+                        [(i // rows) * width, (i % rows) * height, width, height]
+                        for i in range(len(images))
+                    ],
+                }
+            )
         if len(images) > 1:
             nrows = int(np.sqrt(len(images)))
             full_image = tile_images(images, nrows=nrows)
@@ -337,6 +396,8 @@ class RecordVideo(gym.Wrapper):
         infos: Optional[Any] = None,
         rewards: Optional[Any] = None,
         terminations: Optional[Any] = None,
+        *,
+        ppo_boundary: bool = False,
     ):
         """Extract frames from obs and append to the buffer."""
         frames = self._extract_frame_batches(obs)
@@ -350,16 +411,20 @@ class RecordVideo(gym.Wrapper):
         if isinstance(infos, (list, tuple)):
             for time_idx, images in enumerate(frames):
                 step_info = infos[time_idx] if len(infos) > time_idx else None
-                self._append_frame(images, step_info, rewards, terminations, time_idx)
+                self._append_frame(
+                    images, step_info, rewards, terminations, time_idx, ppo_boundary
+                )
             return
 
         for time_idx, images in enumerate(frames):
-            self._append_frame(images, infos, rewards, terminations, time_idx)
+            self._append_frame(
+                images, infos, rewards, terminations, time_idx, ppo_boundary
+            )
 
     def reset(self, *args, **kwargs):
         """Reset env and record the initial frame."""
         obs, info = self.env.reset(*args, **kwargs)
-        self.add_new_frames(obs, info)
+        self.add_new_frames(obs, info, ppo_boundary=True)
         return obs, info
 
     def step(self, action):
@@ -425,7 +490,7 @@ class RecordVideo(gym.Wrapper):
                     else infos_list
                 )
                 self.add_new_frames(obs_main, infos_main, rewards, terminations)
-                self.add_new_frames(reset_obs, None)
+                self.add_new_frames(reset_obs, None, ppo_boundary=True)
             else:
                 self.add_new_frames(obs_list, infos_list, rewards, terminations)
 
@@ -464,6 +529,19 @@ class RecordVideo(gym.Wrapper):
         # Block until the encode + writer.close() returns so the MP4 is valid
         # on disk before the rollout loop continues (or the process exits).
         future.result()
+        if self.video_cfg.get("ppo_overlay", False):
+            import json
+            from pathlib import Path
+
+            if len(frames) != len(self._ppo_frame_manifest):
+                raise ValueError(
+                    "PPO frame manifest length does not match video frames."
+                )
+            Path(mp4_path).with_suffix(".ppo_frames.json").write_text(
+                json.dumps({"frames": self._ppo_frame_manifest}), encoding="utf-8"
+            )
+            self._ppo_frame_manifest = []
+            self._ppo_pending_videos.append(mp4_path)
 
     def _submit_save(self, frames: list[np.ndarray], mp4_path: str) -> Future:
         """Submit a background job to save the video, return its Future."""

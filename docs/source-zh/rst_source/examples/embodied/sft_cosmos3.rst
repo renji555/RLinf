@@ -254,7 +254,7 @@ Source 脚本激活已有环境，设置本地资产和离线缓存。启动命�
 
 Policy 联合生成未来视频和动作。未来视频沿确定性的 ODE 更新，动作在随机选中的一个去噪位置使用 Flow-SDE。PPO 保存该位置的完整 WAM 状态和采样得到的下一步动作张量，更新时重新评价同一个转移。缓存保留选中的一个状态，而非整条去噪链的所有视频状态。PPO 概率比对这个内部动作转移评分，其条件包含缓存的联合 WAM 状态。现有 runner 根据环境动作块的奖励计算 GAE，继续使用标准 PPO actor loss 和带 value clipping 的 Huber critic loss。
 
-执行维度与概率评分维度分别设置：``actor.model.action_dim=7`` 对应 LIBERO 的 axis-angle 动作；``actor.model.logprob_action_dim=10`` 和 ``actor.model.cosmos3.valid_action_dim=10`` 对归一化 rot6d 动作坐标评分。PPO 评分排除 padding 坐标和未执行的动作后缀。当前实现使用条件采样，要求 ``guidance=1.0``、``noise_method=flow_sde`` 和 ``joint_logprob=false``。
+原生 SFT 动作头使用 10 个坐标，其中旋转占 6 维（``actor.model.cosmos3.valid_action_dim=10``）。设置 ``sde_action_space=axisangle7`` 后，rollout 在 7 个归一化坐标上采样随机转移，actor 在相同坐标上重新评分。这 7 维包含 3 维平移、3 维轴角旋转和 1 维夹爪。模型预测 16 步，LIBERO 执行前 5 步，因此保存的 logprob 形状为 ``[batch, 5, 7]``。回放字段 ``model_action`` 保存完整预测序列，每步补零至 32 维，再按样本展平。配置使用 ``guidance=1.0``、``noise_method=flow_sde`` 和 ``joint_logprob=false``。
 
 模型相关流程集中在 Cosmos3 模块下：
 

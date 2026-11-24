@@ -20,13 +20,13 @@ import random
 from typing import Any, Literal
 
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
-from rlinf.data.schema.embodied_types import split_batch_value
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.cosmos3.cosmos3_policy import Cosmos3Policy
 from rlinf.models.embodiment.cosmos3.env_io import Cosmos3EnvIO
-from rlinf.models.embodiment.cosmos3.sampling import bridge, rl_sampler
+from rlinf.models.embodiment.cosmos3.sampling import bridge, libero_sde, rl_sampler
 from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.utils.logging import get_logger
 
@@ -52,6 +52,15 @@ class Cosmos3RL(Cosmos3EnvIO, Cosmos3Policy):
         self.num_steps = int(model_cfg.get("num_inference_steps", 4))
         self.action_chunk = int(model_cfg.num_action_chunks)
         self.valid_action_dim = int(self.rl_cfg.get("valid_action_dim", 10))
+        self.sde_action_space = self.rl_cfg.get("sde_action_space", "rot6d")
+        if self.sde_action_space not in ("rot6d", "axisangle7"):
+            raise ValueError(
+                f"Unsupported Cosmos3 SDE action space: {self.sde_action_space}"
+            )
+        self.score_dim = (
+            7 if self.sde_action_space == "axisangle7" else self.valid_action_dim
+        )
+        self._rotation_affines = None
         self._action_normalizer = None
         self.value_head = ValueHead(
             input_dim=int(model.net.hidden_size),
@@ -83,7 +92,51 @@ class Cosmos3RL(Cosmos3EnvIO, Cosmos3Policy):
         mask = mask.clone()
         mask[:, self.action_chunk :] = False
         mask[:, :, self.valid_action_dim :] = False
+        if self.sde_action_space == "axisangle7":
+            rotation = (
+                mask[..., 3:9].all(dim=-1, keepdim=True).expand(*mask.shape[:-1], 3)
+            )
+            mask = torch.cat((mask[..., :3], rotation, mask[..., 9:10]), dim=-1)
         return mask
+
+    def _sde_rotation_affines(self, reference):
+        if (
+            self._rotation_affines is None
+            or self._rotation_affines[0].device != reference.device
+        ):
+            native = self._get_action_normalizer()
+            lo = reference.new_tensor(list(self.rl_cfg.rotation_q01))
+            hi = reference.new_tensor(list(self.rl_cfg.rotation_q99))
+            self._rotation_affines = (
+                native.offset[3:9].to(reference),
+                native.scale[3:9].to(reference),
+                (hi + lo) / 2,
+                (hi - lo) / 2,
+            )
+        return self._rotation_affines
+
+    def _sde_distribution(self, actions, velocity, indices, times):
+        if self.sde_action_space == "axisangle7":
+            # Rectified flow uses x_t = (1-t)*x_clean + t*eps. The SFT
+            # network predicts velocity in rot6d, so convert its implied clean
+            # endpoint, not the velocity itself, into the seven policy coordinates.
+            t = times[indices].reshape(-1, 1, 1)
+            affines = self._sde_rotation_affines(actions)
+            state7 = libero_sde.to_sde_action(actions, *affines)
+            clean7 = libero_sde.to_sde_action(actions - t * velocity, *affines)
+            angular_velocity = (state7[..., 3:6] - clean7[..., 3:6]) / t
+            velocity = torch.cat(
+                (velocity[..., :3], angular_velocity, velocity[..., 9:10]), dim=-1
+            )
+            actions = state7
+        return rl_sampler.sample_mean_var(
+            actions,
+            velocity,
+            indices,
+            noise_method="flow_sde",
+            noise_level=float(self.rl_cfg.noise_level),
+            timesteps=times,
+        )
 
     def _context(
         self, replay: dict[str, torch.Tensor], seeds: list[int]
@@ -94,50 +147,22 @@ class Cosmos3RL(Cosmos3EnvIO, Cosmos3Policy):
             raise ValueError(f"WAM prompt exceeds max_prompt_length={limit} tokens.")
         return context
 
-    def _predict_sde_step(
-        self,
-        replay: dict[str, torch.Tensor],
-        state: torch.Tensor,
-        timestep: torch.Tensor,
-        micro_batch_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = state.shape[0]
-        sizes = [
-            min(micro_batch_size, batch_size - start)
-            for start in range(0, batch_size, micro_batch_size)
-        ]
-        # Rebuild each pack as actor replay does, using the existing noisy state.
-        outputs = [
-            bridge.predict_velocity(
-                self.omni, self._context(inputs, [0] * size), state_slice, timestep
-            )
-            for size, inputs, state_slice in zip(
-                sizes, split_batch_value(replay, sizes), state.split(sizes)
-            )
-        ]
-        velocities, features = zip(*outputs)
-        return torch.cat(velocities), torch.cat(features)
-
     @torch.no_grad()
     def predict_action_batch(
         self,
         env_obs: dict[str, Any],
         mode: Literal["train", "eval"] = "eval",
         compute_values: bool = True,
-        *,
-        logprob_micro_batch_size: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Sample all WAM steps, recording only the selected PPO transition."""
+        """Use the PPO time grid; evaluation omits the stochastic action step."""
         del kwargs
-        if mode not in ("train", "eval"):
-            raise ValueError(f"Expected mode train or eval, got {mode!r}.")
-        if logprob_micro_batch_size is not None and logprob_micro_batch_size < 1:
-            raise ValueError("Expected a positive logprob_micro_batch_size.")
         # Density recomputation must use the same deterministic denoiser mode.
         self.omni.eval()
         replay = self.replay_observation(env_obs)
         batch_size = replay["observation/image"].shape[0]
+        if mode != "train":
+            compute_values = False
         seeds = torch.randint(0, 2**31, (batch_size,)).tolist()
         context = self._context(replay, seeds)
         if self.action_chunk > context.action_shape[0]:
@@ -151,61 +176,62 @@ class Cosmos3RL(Cosmos3EnvIO, Cosmos3Policy):
         values = []
         old_logprob = None
         for index in range(self.num_steps):
-            if (
-                index == selected
-                and logprob_micro_batch_size is not None
-                and batch_size > logprob_micro_batch_size
-            ):
-                velocity, features = self._predict_sde_step(
-                    replay, state, times[index], logprob_micro_batch_size
-                )
-            else:
-                velocity, features = bridge.predict_velocity(
-                    self.omni, context, state, times[index]
-                )
+            velocity, features = bridge.predict_velocity(
+                self.omni, context, state, times[index]
+            )
             if compute_values:
                 values.append(self._value(features))
             next_state = state + (times[index + 1] - times[index]) * velocity
             if index == selected:
                 actions_pre = bridge.action_latents(context, state)
                 action_velocity = bridge.action_latents(context, velocity)
-                mean, std = rl_sampler.sample_mean_var(
-                    actions_pre,
-                    action_velocity,
-                    torch.full(
-                        (batch_size,), index, device=self.device, dtype=torch.long
-                    ),
-                    noise_method="flow_sde",
-                    noise_level=float(self.rl_cfg.noise_level),
-                    timesteps=times,
+                indices = torch.full(
+                    (batch_size,), index, device=state.device, dtype=torch.long
                 )
-                sampled_action = mean + std * torch.randn_like(mean)
-                next_state[:, context.action_offset :] = sampled_action.reshape(
+                mean, std = self._sde_distribution(
+                    actions_pre, action_velocity, indices, times
+                )
+                sample = mean + std * torch.randn_like(mean)
+                native_next = sample
+                if self.sde_action_space == "axisangle7":
+                    native_next = libero_sde.from_sde_action(
+                        sample, actions_pre, *self._sde_rotation_affines(actions_pre)
+                    )
+                next_state[:, context.action_offset :] = native_next.reshape(
                     batch_size, -1
                 )
                 next_state = bridge.enforce_condition(context, next_state)
-                actions_next = bridge.action_latents(context, next_state)
+                # Retain the actual Gaussian draw, including unwrapped rotation.
+                # A rot6d round trip can map distinct 7D samples to the same pose.
+                actions_next = (
+                    sample
+                    if self.sde_action_space == "axisangle7"
+                    else bridge.action_latents(context, next_state)
+                )
                 old_logprob = rl_sampler.gaussian_logprob(
                     actions_next, mean, std, mask=score_mask
                 )
                 replay["wam_state"] = state.clone()
                 replay["wam_action_next"] = actions_next.clone()
-                replay["denoise_inds"] = torch.full(
-                    (batch_size,), index, device=self.device, dtype=torch.long
-                )
+                replay["denoise_inds"] = indices
             state = bridge.enforce_condition(context, next_state)
-        model_actions = bridge.action_latents(context, state)
-        actions = self.decode_actions(model_actions)
+        native_actions = bridge.action_latents(context, state)
+        actions = self.decode_actions(native_actions)
         if not torch.isfinite(actions).all():
             raise ValueError("WAM generated nonfinite environment actions.")
+        model_actions = native_actions
+        if self.sde_action_space == "axisangle7":
+            # Match Pi0's LIBERO output layout with WAM's normalized coordinates.
+            model_actions = libero_sde.to_sde_action(
+                native_actions, *self._sde_rotation_affines(native_actions)
+            )
+            model_actions = F.pad(model_actions, (0, 32 - model_actions.shape[-1]))
         replay["action"] = actions.reshape(batch_size, -1).clone()
         replay["model_action"] = model_actions.reshape(batch_size, -1).clone()
         return actions, {
             "prev_logprobs": None
             if old_logprob is None
-            else old_logprob[
-                :, : self.action_chunk, : self.valid_action_dim
-            ].contiguous(),
+            else old_logprob[:, : self.action_chunk, : self.score_dim].contiguous(),
             "prev_values": torch.stack(values, dim=1).mean(dim=1, keepdim=True)
             if values
             else torch.zeros(batch_size, 1, device=self.device),
@@ -232,20 +258,23 @@ class Cosmos3RL(Cosmos3EnvIO, Cosmos3Policy):
         velocity, features = bridge.predict_velocity(
             self.omni, context, state, times[indices]
         )
-        mean, std = rl_sampler.sample_mean_var(
+        mean, std = self._sde_distribution(
             bridge.action_latents(context, state),
             bridge.action_latents(context, velocity),
             indices,
-            noise_method="flow_sde",
-            noise_level=float(self.rl_cfg.noise_level),
-            timesteps=times,
+            times,
         )
+        if action_next.shape != mean.shape:
+            raise ValueError(
+                f"Stored WAM SDE draw has shape {tuple(action_next.shape)}, but "
+                f"{self.sde_action_space} replay expects {tuple(mean.shape)}."
+            )
         score_mask = self._score_mask(context)
         logprobs = rl_sampler.gaussian_logprob(action_next, mean, std, mask=score_mask)
         scored_actions = (
             slice(None),
             slice(self.action_chunk),
-            slice(self.valid_action_dim),
+            slice(self.score_dim),
         )
         output = {
             "logprobs": logprobs[scored_actions].contiguous(),

@@ -546,13 +546,6 @@ class MultiStepRolloutWorker(Worker):
             else:
                 kwargs = {"mode": mode}
 
-        if (
-            model_type == SupportedModel.COSMOS3
-            and kwargs.get("mode") == "train"
-            and self.model_cfg.get("cosmos3", {}).get("task") == "rl"
-        ):
-            kwargs["logprob_micro_batch_size"] = self.cfg.actor.micro_batch_size
-
         if model_type in [
             SupportedModel.CNN_POLICY,
             SupportedModel.FLOW_POLICY,

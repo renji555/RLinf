@@ -734,6 +734,22 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     self.rollout_batch[key], target_steps, (key,)
                 )
 
+        ppo_video = (
+            self.cfg.env.train.video_cfg.get("ppo_overlay", False)
+            and self.cfg.env.train.video_cfg.save_video
+        )
+        self._ppo_video_rows = [] if ppo_video else None
+        if ppo_video and (
+            self.cfg.actor.model.model_type != "cosmos3"
+            or self.cfg.algorithm.loss_type != "actor_critic"
+            or self.cfg.algorithm.logprob_type != "chunk_level"
+            or self.cfg.algorithm.reward_type != "chunk_level"
+            or self.cfg.algorithm.get("recompute_logprobs", False)
+            or self.cfg.runner.get("use_training_pipeline", False)
+        ):
+            raise ValueError(
+                "PPO video overlay requires synchronous Cosmos3 chunk-level PPO without logprob recomputation."
+            )
         self.model.train()
         rollout_size = (
             self.rollout_batch["prev_logprobs"].shape[0]
@@ -792,7 +808,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self._log_wam_optimizer_step(
                 probe_batch, reference_means, 0, total_steps, "before_update"
             )
-        for _ in range(update_epoch):
+        for training_epoch in range(update_epoch):
+            self._ppo_video_epoch = training_epoch + 1
             rollout_dataloader_iter = split_dict_to_chunk(
                 self.rollout_batch,
                 batches_per_epoch,
@@ -846,6 +863,16 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 if len(lr_list) > 1:
                     data["critic/lr"] = lr_list[1]
                 append_to_dict(metrics, data)
+        if ppo_video:
+            from rlinf.utils.rollout_video import write_video_metrics
+
+            write_video_metrics(
+                self.cfg.runner.logger.log_path,
+                self.version,
+                self._rank,
+                self._ppo_video_rows,
+            )
+            self._ppo_video_rows = None
         # put LR scheduler step here
         if not freeze_actor_updates:
             self.lr_scheduler.step()
@@ -980,7 +1007,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     self.cfg.algorithm.clip_log_ratio_max
                 )
 
+        sample_metrics = None
+        if getattr(self, "_ppo_video_rows", None) is not None:
+            sample_metrics = {}
+            loss_kwargs["per_sample_metrics"] = sample_metrics
         loss, metrics_data = policy_loss(**loss_kwargs)
+        if sample_metrics is not None:
+            from rlinf.utils.rollout_video import collect_video_metrics
+
+            sample_metrics["raw_advantage"] = returns - prev_values
+            sample_metrics["rollout_value"] = prev_values
+            sample_metrics["reward"] = micro_batch["rewards"].sum(dim=-1)
+            self._ppo_video_rows.extend(
+                collect_video_metrics(
+                    forward_inputs["video_sample_id"],
+                    sample_metrics,
+                    actor_rank=self._rank,
+                    update_epoch=self._ppo_video_epoch,
+                    optimizer_step=self.optimizer_steps + 1,
+                )
+            )
         entropy_loss = torch.tensor(0.0, device=Worker.torch_platform.current_device())
         if compute_entropy and not loss_kwargs["critic_warmup"]:
             entropy = output_dict.get("entropy", None)

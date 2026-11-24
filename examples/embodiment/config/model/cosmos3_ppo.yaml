@@ -13,11 +13,12 @@ tokenizer_path: /mnt/public/rhy/dataset/Cosmos3-Edge
 
 action_model_mode: wam
 action_dim: 7
-logprob_action_dim: 10
-num_action_chunks: 10
+logprob_action_dim: 7
+num_action_chunks: 5
 num_frames: 17
 image_size: 256
 fps: 20
+# Rollout and evaluation share this grid; evaluation uses only ODE updates.
 num_inference_steps: 4
 guidance: 1.0
 max_prompt_length: 1024
@@ -46,6 +47,11 @@ cosmos3:
   noise_method: flow_sde
   joint_logprob: false
   noise_level: 0.5
-  valid_action_dim: 10
+  valid_action_dim: 10  # Native SFT head uses rot6d.
+  sde_action_space: axisangle7
+  # Frame-weighted 1st/99th percentiles of raw action[3:6] from 273465
+  # LeRobot LIBERO spatial/object/goal/10 frames, in axis-angle radians.
+  rotation_q01: [-0.11464286, -0.16392857, -0.22392857]
+  rotation_q99: [0.13178572, 0.19285715, 0.33535713]
   detach_critic_input: true
   value_hidden_dims: [512, 256, 128]

@@ -322,6 +322,23 @@ def compute_ppo_actor_loss(
     else:
         dual_clip_mask = torch.zeros_like(clip_mask)
 
+    per_sample_metrics = kwargs.get("per_sample_metrics")
+    if per_sample_metrics is not None:
+        per_sample_metrics.update(
+            {
+                "logprob_new": logprobs.detach(),
+                "logprob_old": old_logprobs.detach(),
+                "ratio": ratio.detach(),
+                "advantage": advantages.detach(),
+                "policy_loss": (
+                    torch.zeros_like(policy_loss)
+                    if critic_warmup
+                    else torch.where(loss_mask, policy_loss.detach(), 0.0)
+                ),
+                "loss_mask": loss_mask.detach(),
+            }
+        )
+
     metric_policy_loss_abs = loss_agg_func(
         policy_loss.abs(), loss_mask, loss_mask_ratio
     )
@@ -467,6 +484,19 @@ def compute_ppo_critic_loss(
         returns - value_pred_clipped, huber_delta
     )  # [bsz, ] | [bsz, chunk-step]
     value_loss = torch.max(value_loss_original, value_loss_clipped)
+    per_sample_metrics = kwargs.get("per_sample_metrics")
+    if per_sample_metrics is not None:
+        per_sample_metrics.update(
+            {
+                "value": values.detach(),
+                "return": returns.detach(),
+                "value_loss": (
+                    value_loss.detach()
+                    if loss_mask is None
+                    else torch.where(loss_mask, value_loss.detach(), 0.0)
+                ),
+            }
+        )
     value_loss = loss_agg_func(value_loss, loss_mask, loss_mask_ratio)
 
     # Measure the update *before* clipping: ``value_pred_clipped - prev_values``

@@ -135,6 +135,7 @@ exclude = ["tests*", "docs*", "examples*", "docker*", "toolkits*"]
 
 [tool.setuptools.package-data]
 rlinf = ["**/*.yaml", "**/*.yml"]
+"rlinf.utils" = ["ppo_video_catalog.html", "ppo_video_detail.html"]
 
 [tool.ruff]
 line-length = 88

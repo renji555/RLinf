@@ -86,6 +86,11 @@ class Cosmos3EnvIO:
                     "Main and wrist cameras must have matching batch sizes."
                 )
             result["observation/wrist_image"] = wrist
+        if "video_sample_id" in env_obs:
+            sample_ids = torch.as_tensor(env_obs["video_sample_id"]).detach().cpu()
+            if sample_ids.dtype != torch.long or sample_ids.shape != (batch_size, 6):
+                raise ValueError("Expected video_sample_id int64 [B,6].")
+            result["video_sample_id"] = sample_ids
         return result
 
     def native_batch(self, replay: dict[str, torch.Tensor]) -> dict[str, Any]:
@@ -168,12 +173,8 @@ class Cosmos3EnvIO:
         batch["image_size"] = torch.cat([item["image_size"] for item in items])
         return batch
 
-    def decode_actions(self, normalized: torch.Tensor) -> torch.Tensor:
-        """Denormalize LIBERO rot6d actions and execute only the configured prefix."""
+    def _get_action_normalizer(self):
         from cosmos_framework.data.generator.action.utils import action_processing
-        from cosmos_framework.data.generator.action.utils.pose_utils import (
-            convert_rotation,
-        )
 
         if self._action_normalizer is None:
             stats = self.model_cfg.get("action_stats_path") or (
@@ -187,7 +188,15 @@ class Cosmos3EnvIO:
                 apply_forward_clamp=False,
                 expected_dim=10,
             )
-        raw = self._action_normalizer.denormalize_action(normalized[..., :10])
+        return self._action_normalizer
+
+    def decode_actions(self, normalized: torch.Tensor) -> torch.Tensor:
+        """Denormalize LIBERO rot6d actions and execute only the configured prefix."""
+        from cosmos_framework.data.generator.action.utils.pose_utils import (
+            convert_rotation,
+        )
+
+        raw = self._get_action_normalizer().denormalize_action(normalized[..., :10])
         rotation = convert_rotation(
             raw[..., 3:9], input_format="rot6d", output_format="axisangle"
         )

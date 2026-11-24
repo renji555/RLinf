@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PPO 视频与逐帧指标</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f6f9;--surface:#fff;--fg:#1b2635;--muted:#627086;--line:#dce3ec;--accent:#285ed6;--soft:#eaf0fc;--negative:#b64040;--positive:#25774a;--player:#10151d;--plot:#2469b5;--cursor:#9a5b11}
+@media(prefers-color-scheme:dark){:root{--bg:#151b24;--surface:#1d2734;--fg:#e7edf6;--muted:#a2b0c3;--line:#364456;--accent:#91b3ff;--soft:#293c5f;--negative:#ffa3a3;--positive:#9ddbb3;--player:#0b1016;--plot:#98c6ff;--cursor:#edbd7c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1440px;margin:auto;padding:24px}h1{font-size:23px;margin:3px 0 4px;overflow-wrap:anywhere}h2{font-size:16px;margin:0}p{margin:4px 0}.muted{color:var(--muted)}a{color:var(--accent)}button,select,input{font:inherit}button,select{color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:7px 10px}button{cursor:pointer}button:hover{background:var(--soft)}button:disabled{opacity:.4;cursor:default}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}.page-head{display:flex;gap:20px;justify-content:space-between;align-items:flex-start;margin-bottom:17px}.downloads{display:flex;gap:12px;flex-wrap:wrap;padding-top:7px;font-size:13px;white-space:nowrap}.layout{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,1fr);gap:18px;align-items:start}.viewer{min-width:0}.video-wrap{background:var(--player);border-radius:10px;overflow:hidden}video{display:block;width:100%;height:auto;max-height:70vh;margin:auto;object-fit:contain}.timeline{padding:13px 15px;border:1px solid var(--line);border-radius:10px;background:var(--surface);margin-top:11px}.frame-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.frame-position{margin-left:auto;font-size:13px;font-variant-numeric:tabular-nums}#frame-slider{width:100%;margin:10px 0 0;accent-color:var(--accent)}.selection{display:grid;grid-template-columns:1fr 1.3fr;gap:12px;margin-bottom:12px}.selection select{width:100%;min-width:0}.env-panel{padding:13px 15px;background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-top:11px}.env-heading{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:9px}.env-grid{display:grid;gap:6px;max-width:430px}.env-grid button{font-size:12px;min-height:31px;padding:5px 7px;font-variant-numeric:tabular-nums}.env-grid button[aria-pressed=true]{background:var(--accent);color:var(--surface);border-color:var(--accent)}.current-panel{border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:15px;min-width:0}.current-heading{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:4px}.status{font-size:12px;min-height:20px;overflow-wrap:anywhere}.status.invalid{color:var(--negative)}.metric-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px 17px;margin-top:6px}.metric{padding:11px 0;border-bottom:1px solid var(--line);min-width:0}.metric-label{font-size:12px;color:var(--muted)}.metric-value{font-size:24px;font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.positive{color:var(--positive)}.negative{color:var(--negative)}.details{width:100%;border-collapse:collapse;margin-top:13px;font-size:13px}.details th,.details td{padding:5px 0;vertical-align:top;text-align:left;border-bottom:1px solid var(--line)}.details th{width:45%;color:var(--muted);font-weight:400;padding-right:10px}.details td{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.note{color:var(--muted);font-size:12px;line-height:1.65;margin-top:12px}.chart-panel{padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-top:18px}.chart-head{display:flex;gap:14px;justify-content:space-between;align-items:center;flex-wrap:wrap}.chart-head .field{display:flex;gap:9px;align-items:center}.chart-head label{margin:0;white-space:nowrap}.chart-head select{font-size:13px;max-width:220px}.chart-value{font-size:13px;font-variant-numeric:tabular-nums}.chart{width:100%;height:230px;display:block;touch-action:pan-y}.chart text{fill:var(--muted);font:12px system-ui,sans-serif}.chart .grid{stroke:var(--line);stroke-width:1}.chart .series{stroke:var(--plot);stroke-width:1.8;fill:none}.chart .cursor{stroke:var(--cursor);stroke-width:1.3;stroke-dasharray:4 4}.chart .reference{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4;opacity:.5}.chart .selected-point{fill:var(--cursor)}.chart-help{font-size:12px;color:var(--muted);margin-top:4px}.metadata{margin-top:17px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}.error{color:var(--negative);padding:14px;border:1px solid var(--negative);border-radius:8px;margin-bottom:14px}[hidden]{display:none!important}@media(max-width:1050px){.layout{grid-template-columns:minmax(0,1.3fr) minmax(290px,1fr)}main{padding:18px}.metric-value{font-size:21px}}@media(max-width:800px){.layout{grid-template-columns:1fr}.page-head{display:block}.downloads{padding-top:6px;margin-bottom:4px}.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.current-panel{padding:13px 15px}.details th{width:40%}video{max-height:67vh}}@media(max-width:480px){main{padding:12px}.selection{grid-template-columns:1fr}.metric-grid{grid-template-columns:1fr 1fr}.metric-value{font-size:21px}.page-head h1{font-size:20px}.frame-position{width:100%;margin-left:0}.frame-controls button{flex:1}.chart-panel{padding:12px}.chart-head{gap:6px}.chart-head .field{width:100%;justify-content:space-between}.chart-head select{max-width:none;flex:1}.env-grid{max-width:none}.env-grid button{padding:5px 3px}}
+</style>
+</head>
+<body>
+<main id="ppo-video-detail">
+  <header class="page-head">
+    <div><a href="../index.html">← 全部视频</a><h1 id="video-name">PPO 视频与逐帧指标</h1><p class="muted" id="video-summary"></p></div>
+    <nav class="downloads" aria-label="数据下载"><a id="download-video" download>下载视频</a><a id="download-json" download>完整 JSON</a><a id="download-csv" download>逐帧 CSV</a></nav>
+  </header>
+  <div id="page-error" class="error" role="alert" hidden></div>
+  <div class="layout">
+    <section class="viewer" aria-label="Rollout 视频">
+      <div class="video-wrap"><video id="rollout-video" controls preload="metadata" playsinline aria-label="PPO rollout 视频"></video></div>
+      <p id="video-error" class="note" role="alert" hidden>视频暂时无法播放。请确认 MP4 与本页位于同一目录，或通过训练日志的网页服务打开。</p>
+      <div class="timeline">
+        <div class="frame-controls"><button id="previous-frame" type="button">← 上一帧</button><button id="next-frame" type="button">下一帧 →</button><span class="frame-position" id="frame-position"></span></div>
+        <label for="frame-slider" id="timeline-label">视频帧</label><input id="frame-slider" type="range" min="0" max="0" step="1" value="0">
+      </div>
+      <div class="env-panel">
+        <div class="env-heading"><h2>选择画面中的环境</h2><span class="muted" id="env-layout-label"></span></div>
+        <div class="env-grid" id="env-grid" role="group" aria-label="视频环境布局"></div>
+        <p class="note">编号位置与视频拼接布局一致；选择环境只切换下方数据，视频仍显示全部环境。</p>
+      </div>
+    </section>
+    <aside class="current-panel" aria-label="当前帧训练详情">
+      <div class="selection">
+        <div><label for="env-select">环境</label><select id="env-select"></select></div>
+        <div><label for="pass-select">训练记录（更新前）</label><select id="pass-select"></select></div>
+      </div>
+      <div class="current-heading"><h2>当前帧对应的 chunk</h2><span id="current-chunk" class="muted"></span></div>
+      <p class="status muted" id="sample-status" aria-live="polite"></p>
+      <div class="metric-grid">
+        <div class="metric"><div class="metric-label">Advantage · 实际训练 A</div><div class="metric-value" id="metric-advantage">—</div></div>
+        <div class="metric"><div class="metric-label">Ratio · exp(new − old)</div><div class="metric-value" id="metric-ratio">—</div></div>
+        <div class="metric"><div class="metric-label">Log_prob old · chunk</div><div class="metric-value" id="metric-logprob-old">—</div></div>
+        <div class="metric"><div class="metric-label">Log_prob new · chunk</div><div class="metric-value" id="metric-logprob-new">—</div></div>
+        <div class="metric"><div class="metric-label">Policy loss · 单样本项</div><div class="metric-value" id="metric-policy-loss">—</div></div>
+        <div class="metric"><div class="metric-label">Value loss · 单样本项</div><div class="metric-value" id="metric-value-loss">—</div></div>
+      </div>
+      <table class="details" aria-label="精确数值与训练身份"><tbody id="details-body"></tbody></table>
+      <p class="note">Advantage 来自交互后的 GAE。一个 chunk 内的多帧对应同一组指标；loss 是该样本在所选 optimizer 更新前的目标项，尚未做 batch 聚合与梯度累积缩放。</p>
+    </aside>
+  </div>
+  <section class="chart-panel" aria-label="按视频帧对齐的指标曲线">
+    <div class="chart-head"><h2>所选环境的轨迹指标</h2><div class="field"><label for="curve-metric">曲线</label><select id="curve-metric"><option value="advantage">Advantage</option><option value="raw_advantage">原始 advantage</option><option value="ratio">Ratio</option><option value="policy_loss">Policy loss</option><option value="value_loss">Value loss</option><option value="value">Value · 训练前向</option><option value="rollout_value">Value · rollout</option><option value="return">Return</option><option value="reward">训练 reward</option><option value="logprob_old">Log_prob old</option><option value="logprob_new">Log_prob new</option></select></div><span id="curve-current" class="chart-value"></span></div>
+    <svg id="metric-curve" class="chart" role="img" aria-label="指标随视频帧变化，点击曲线可定位视频帧"></svg>
+    <p class="chart-help">横轴：视频帧编号（从 0 开始）。点击曲线定位帧；同一 chunk 内保持该指标值，边界帧留空。</p>
+  </section>
+  <p class="metadata" id="data-footer"></p>
+</main>
+<script type="application/json" id="ppo-video-data">__PPO_VIDEO_DATA__</script>
+<script>
+(function(){
+  'use strict';
+  var root=document.getElementById('ppo-video-detail');
+  function get(id){return document.getElementById(id);}
+  function text(element,value){element.textContent=value;}
+  function finite(value){return typeof value==='number'&&Number.isFinite(value);}
+  function fmt(value,precision){return finite(value)?value.toPrecision(precision||6).replace(/(\.\d*?[1-9])0+(?=e|$)|\.0+(?=e|$)/,'$1'):'N/A';}
+  function exact(value){return finite(value)?String(value):'N/A';}
+  function option(value,label){var item=document.createElement('option');item.value=String(value);item.textContent=label;return item;}
+  function relativeURL(value){return typeof value==='string'&&value.length&&!/^\s*(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)?value:null;}
+  function setLink(id,href){var link=get(id),safe=relativeURL(href);if(safe){link.href=safe;}else{link.hidden=true;}}
+  function svgNode(tag,attributes,label){var element=document.createElementNS('http://www.w3.org/2000/svg',tag);Object.keys(attributes||{}).forEach(function(key){element.setAttribute(key,String(attributes[key]));});if(label!==undefined)text(element,label);return element;}
+  var data;
+  try{
+    data=JSON.parse(get('ppo-video-data').textContent);
+    if(data.schema_version!==1||!data.video||!Array.isArray(data.frames)||!data.frames.length||!data.samples||!finite(data.video.fps)||data.video.fps<=0||data.frames.length!==data.video.frame_count)throw new Error('视频详情数据格式不完整。');
+  }catch(error){text(get('page-error'),'无法读取详情数据：'+error.message);get('page-error').hidden=false;return;}
+  var video=get('rollout-video'),slider=get('frame-slider'),envSelect=get('env-select'),passSelect=get('pass-select');
+  var frameIndex=0,envIndex=0,preferredEpoch=null,pendingSeek=null,curveGeometry=null;
+  var layout=data.frames[0].tile_boxes||[],envCount=layout.length;
+  if(!envCount){text(get('page-error'),'没有环境画面布局。');get('page-error').hidden=false;return;}
+  var fps=data.video.fps,lastFrame=data.frames.length-1;
+  var firstAction=data.frames.find(function(frame){return Array.isArray(frame.sample_ids)&&frame.sample_ids.some(function(id){return id!==null;});});
+  function frameIDs(index){return Array.isArray(data.frames[index].sample_ids)?data.frames[index].sample_ids:[];}
+  function sampleID(index){return frameIDs(index)[envIndex]||null;}
+  function sampleRows(id){return id&&Object.prototype.hasOwnProperty.call(data.samples,id)&&Array.isArray(data.samples[id])?data.samples[id]:[];}
+  function chosenRow(id){var rows=sampleRows(id);if(!rows.length)return null;if(preferredEpoch!==null){for(var i=rows.length-1;i>=0;i--){if(rows[i].update_epoch===preferredEpoch)return rows[i];}}return rows[rows.length-1];}
+  function tileLabel(index){var id=firstAction&&firstAction.sample_ids[index],rows=sampleRows(id),record=rows[0];return record?'Env '+record.sample_id[2]+':'+record.sample_id[5]:'画面 '+index;}
+  function addDetail(label,value){var row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.scope='row';text(heading,label);text(cell,value);row.append(heading,cell);get('details-body').appendChild(row);}
+  function metric(id,value,signed){var element=get(id);text(element,fmt(value));element.classList.toggle('positive',!!signed&&finite(value)&&value>0);element.classList.toggle('negative',!!signed&&finite(value)&&value<0);}
+  function updatePasses(record){
+    var rows=sampleRows(sampleID(frameIndex));passSelect.replaceChildren();
+    if(!rows.length){passSelect.appendChild(option('', '当前为边界帧'));passSelect.disabled=true;return;}
+    rows.forEach(function(row,index){passSelect.appendChild(option(index,'第 '+row.update_epoch+' 遍 · optimizer #'+row.optimizer_step+' 前'));});
+    passSelect.disabled=false;passSelect.value=String(rows.indexOf(record));
+  }
+  function updateDetails(){
+    var id=sampleID(frameIndex),record=chosenRow(id);updatePasses(record);
+    text(get('frame-position'),'帧 '+frameIndex+' / '+lastFrame+' · '+(frameIndex/fps).toFixed(3)+' 秒');slider.value=String(frameIndex);
+    get('previous-frame').disabled=frameIndex===0;get('next-frame').disabled=frameIndex===lastFrame;
+    text(get('timeline-label'),'当前视频帧：'+frameIndex);
+    text(get('current-chunk'),record?'Chunk '+record.sample_id[4]:'N/A');
+    text(get('sample-status'),record?(record.valid?'有效样本 · loss 取自实际训练前向':'无效样本 · 不参与该项 loss'):'初始 / 重置边界观测 · 没有对应的动作样本');
+    get('sample-status').classList.toggle('invalid',!!record&&!record.valid);
+    metric('metric-advantage',record&&record.advantage,true);metric('metric-ratio',record&&record.ratio,false);
+    metric('metric-logprob-old',record&&record.logprob_old,false);metric('metric-logprob-new',record&&record.logprob_new,false);
+    metric('metric-policy-loss',record&&record.policy_loss,false);metric('metric-value-loss',record&&record.value_loss,false);
+    get('details-body').replaceChildren();
+    addDetail('当前环境',tileLabel(envIndex));
+    var info=Array.isArray(data.frames[frameIndex].infos)?data.frames[frameIndex].infos[envIndex]:null;
+    addDetail('本帧环境 reward',info&&finite(info.reward)?exact(info.reward):'未记录');
+    addDetail('本帧 termination',info&&typeof info.termination==='boolean'?String(info.termination):'未记录');
+    addDetail('Episode 当前步数',info&&finite(info['episode.episode_len'])?exact(info['episode.episode_len']):'未记录');
+    addDetail('Episode success_once',info&&typeof info['episode.success_once']==='boolean'?String(info['episode.success_once']):'未记录');
+    if(record){
+      addDetail('训练前向 Value',exact(record.value));addDetail('Rollout Value',exact(record.rollout_value));addDetail('Return',exact(record.return));addDetail('原始 advantage',exact(record.raw_advantage));addDetail('训练 reward · chunk',exact(record.reward));
+      addDetail('Log_prob old · 精确',exact(record.logprob_old));addDetail('Log_prob new · 精确',exact(record.logprob_new));addDetail('Policy loss · 精确',exact(record.policy_loss));addDetail('Value loss · 精确',exact(record.value_loss));addDetail('Log_prob 差值',finite(record.logprob_new)&&finite(record.logprob_old)?exact(record.logprob_new-record.logprob_old):'N/A');
+      addDetail('Rollout / epoch',String(record.sample_id[0]+1)+' / '+String(record.sample_id[1]));addDetail('Env rank / stage',String(record.sample_id[2])+' / '+String(record.sample_id[3]));
+      addDetail('训练遍数 / optimizer',String(record.update_epoch)+' / #'+String(record.optimizer_step)+'（更新前）');addDetail('Actor rank',String(record.actor_rank));addDetail('样本 ID',id);
+    }else{addDetail('Advantage / log_prob / loss','N/A');}
+    updateCursor();
+  }
+  function setFrame(index,seek){
+    frameIndex=Math.max(0,Math.min(lastFrame,Math.round(index)));updateDetails();
+    if(seek){var position=frameIndex/fps+0.00001/fps;try{video.currentTime=position;pendingSeek=null;}catch(error){pendingSeek=position;}}
+  }
+  function updateFromTime(time){if(finite(time)){var index=Math.max(0,Math.min(lastFrame,Math.floor(time*fps+0.0001)));if(index!==frameIndex)setFrame(index,false);}}
+  function resizeCurve(){drawCurve();updateCursor();}
+  function drawCurve(){
+    var svg=get('metric-curve');svg.replaceChildren();var W=Math.max(280,svg.clientWidth||760),H=230,L=66,R=18,T=17,B=40,metricName=get('curve-metric').value;
+    var values=data.frames.map(function(frame,index){var record=chosenRow(sampleID(index));return record&&finite(record[metricName])?record[metricName]:null;});
+    var valid=values.filter(finite),minimum=valid.length?Math.min.apply(null,valid):0,maximum=valid.length?Math.max.apply(null,valid):1;
+    if(minimum===maximum){var padding=Math.max(Math.abs(minimum)*.1,.1);minimum-=padding;maximum+=padding;}else{var range=maximum-minimum;minimum-=range*.09;maximum+=range*.09;}
+    function x(index){return L+(W-L-R)*index/Math.max(1,lastFrame);}function y(value){return T+(H-T-B)*(maximum-value)/(maximum-minimum);}
+    svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.setAttribute('preserveAspectRatio','none');
+    for(var j=0;j<4;j++){var tick=minimum+(maximum-minimum)*j/3;svg.appendChild(svgNode('line',{x1:L,y1:y(tick),x2:W-R,y2:y(tick),'class':'grid'}));svg.appendChild(svgNode('text',{x:L-8,y:y(tick)+4,'text-anchor':'end'},fmt(tick,3)));}
+    var ticks=W<430?3:5;for(var k=0;k<ticks;k++){var index=Math.round(lastFrame*k/(ticks-1));svg.appendChild(svgNode('text',{x:x(index),y:H-17,'text-anchor':k===0?'start':k===ticks-1?'end':'middle'},String(index)));}
+    var reference=metricName==='ratio'?1:0;if(reference>=minimum&&reference<=maximum)svg.appendChild(svgNode('line',{x1:L,y1:y(reference),x2:W-R,y2:y(reference),'class':'reference'}));
+    var path='',connected=false;values.forEach(function(value,index){if(finite(value)){path+=(connected?'L':'M')+x(index).toFixed(2)+','+y(value).toFixed(2);connected=true;}else{connected=false;}});
+    svg.appendChild(svgNode('path',{d:path,'class':'series'}));svg.appendChild(svgNode('line',{id:'curve-cursor',y1:T,y2:H-B,'class':'cursor'}));svg.appendChild(svgNode('circle',{id:'curve-point',r:3.3,'class':'selected-point'}));
+    svg.appendChild(svgNode('text',{x:W-R,y:H-2,'text-anchor':'end'},'视频帧'));
+    if(!valid.length)svg.appendChild(svgNode('text',{x:(L+W-R)/2,y:H/2,'text-anchor':'middle'},'此环境没有该指标记录'));
+    curveGeometry={W:W,H:H,L:L,R:R,x:x,y:y,values:values,metric:metricName};
+  }
+  function updateCursor(){
+    if(!curveGeometry)return;var g=curveGeometry,cursor=get('curve-cursor'),point=get('curve-point'),value=g.values[frameIndex];
+    cursor.setAttribute('x1',g.x(frameIndex));cursor.setAttribute('x2',g.x(frameIndex));point.hidden=!finite(value);point.setAttribute('visibility',finite(value)?'visible':'hidden');if(finite(value)){point.setAttribute('cx',g.x(frameIndex));point.setAttribute('cy',g.y(value));}
+    var selected=get('curve-metric');text(get('curve-current'),selected.options[selected.selectedIndex].textContent+'：'+fmt(value));
+  }
+  function selectEnvironment(index){
+    envIndex=Math.max(0,Math.min(envCount-1,Number(index)));envSelect.value=String(envIndex);
+    Array.from(get('env-grid').children).forEach(function(button,i){button.setAttribute('aria-pressed',String(i===envIndex));});
+    drawCurve();updateDetails();
+  }
+  text(get('video-name'),data.video.name||'PPO rollout 视频');document.title=(data.video.name||'PPO rollout')+' · 逐帧指标';
+  text(get('video-summary'),data.frames.length+' 帧 · '+fps+' FPS · '+(data.frames.length/fps).toFixed(2)+' 秒 · '+envCount+' 个环境');
+  var safeVideo=relativeURL(data.video.src);if(safeVideo)video.src=safeVideo;
+  setLink('download-video',data.video.src);setLink('download-json',data.json_href);setLink('download-csv',data.csv_href);
+  slider.max=String(lastFrame);
+  var tileWidth=layout[0][2],tileHeight=layout[0][3],cols=data.video.cols||Math.max.apply(null,layout.map(function(box){return box[0]/tileWidth+1;})),rows=data.video.rows||Math.max.apply(null,layout.map(function(box){return box[1]/tileHeight+1;}));
+  get('env-grid').style.gridTemplateColumns='repeat('+cols+',minmax(0,1fr))';text(get('env-layout-label'),rows+' 行 × '+cols+' 列');
+  layout.forEach(function(box,index){
+    envSelect.appendChild(option(index,tileLabel(index)));var button=document.createElement('button');button.type='button';text(button,tileLabel(index));button.style.gridColumn=String(box[0]/tileWidth+1);button.style.gridRow=String(box[1]/tileHeight+1);button.setAttribute('aria-pressed',String(index===0));button.addEventListener('click',function(){selectEnvironment(index);});get('env-grid').appendChild(button);
+  });
+  text(get('data-footer'),'视频叠字状态：'+(data.video.ppo_annotated?'已完成':'待完成')+'。JSON 保存帧与样本的精确映射及全部训练记录；CSV 按视频帧、环境展开，采用视频叠字使用的最后一次训练记录。');
+  envSelect.addEventListener('change',function(){selectEnvironment(envSelect.value);});
+  passSelect.addEventListener('change',function(){var record=sampleRows(sampleID(frameIndex))[Number(passSelect.value)];if(record){preferredEpoch=record.update_epoch;drawCurve();updateDetails();}});
+  slider.addEventListener('input',function(){video.pause();setFrame(Number(slider.value),true);});
+  get('previous-frame').addEventListener('click',function(){video.pause();setFrame(frameIndex-1,true);});get('next-frame').addEventListener('click',function(){video.pause();setFrame(frameIndex+1,true);});
+  get('curve-metric').addEventListener('change',function(){drawCurve();updateCursor();});
+  get('metric-curve').addEventListener('click',function(event){var box=this.getBoundingClientRect(),g=curveGeometry;if(g&&box.width){var position=(event.clientX-box.left)*g.W/box.width;video.pause();setFrame((position-g.L)/(g.W-g.L-g.R)*lastFrame,true);}});
+  video.addEventListener('timeupdate',function(){updateFromTime(video.currentTime);});video.addEventListener('seeked',function(){updateFromTime(video.currentTime);});
+  video.addEventListener('loadedmetadata',function(){if(pendingSeek!==null){video.currentTime=pendingSeek;pendingSeek=null;}updateFromTime(video.currentTime);});
+  video.addEventListener('error',function(){get('video-error').hidden=false;});
+  if(typeof video.requestVideoFrameCallback==='function'){var observeFrame=function(now,metadata){updateFromTime(metadata.mediaTime);video.requestVideoFrameCallback(observeFrame);};video.requestVideoFrameCallback(observeFrame);}
+  if(typeof ResizeObserver==='function'){new ResizeObserver(resizeCurve).observe(get('metric-curve'));}else{window.addEventListener('resize',resizeCurve);}
+  selectEnvironment(0);
+})();
+</script>
+</body>
+</html>

@@ -299,6 +299,13 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         from rlinf.config import torch_dtype_from_precision
         from rlinf.models.embodiment.cosmos3.tasks.rl import Cosmos3RL
 
+        # Reduced BF16 accumulation can select different precision at different
+        # packed token counts, changing frozen-policy PPO likelihood ratios.
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+        logger.info(
+            "Cosmos3 PPO: allow_bf16_reduced_precision_reduction=%s",
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        )
         policy = Cosmos3RL(cosmos3_model, cfg)
         # FSDP retains FP32 trainable master weights and gathers BF16 for compute.
         dtype = torch_dtype or torch_dtype_from_precision(cfg.get("precision", "fp32"))

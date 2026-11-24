@@ -554,6 +554,18 @@ class EmbodiedRunner:
                     if env_bootstrap_handle is not None:
                         env_bootstrap_handle.wait()
 
+                if (
+                    self.cfg.env.train.video_cfg.get("ppo_overlay", False)
+                    and self.cfg.env.train.video_cfg.save_video
+                ):
+                    env_handle.wait()
+                    with self.timer("annotate_rollout_videos"):
+                        self.env.annotate_ppo_videos(
+                            _step, self.actor._world_size
+                        ).wait()
+                        from rlinf.utils.rollout_video import build_video_catalog
+
+                        build_video_catalog(self.cfg.env.train.video_cfg.video_base_dir)
                 self.global_step += 1
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
 
